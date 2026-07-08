@@ -3,8 +3,8 @@
   "version": "0.1.0",
   "description": "Dynamic-island style desktop widget for Claude agents",
   "author": { "name": "AgentNotch", "email": "noreply@agentnotch.app" },
-  "homepage": "https://github.com/Mystic0112/agentnotch",
-  "repository": { "type": "git", "url": "https://github.com/Mystic0112/agentnotch.git" },
+  "homepage": "https://github.com/Mystic0112/Agentnotch",
+  "repository": { "type": "git", "url": "https://github.com/Mystic0112/Agentnotch.git" },
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -55,7 +55,7 @@
       "category": "Utility"
     },
     "publish": [
-      { "provider": "github", "owner": "Mystic0112", "repo": "agentnotch" }
+      { "provider": "github", "owner": "Mystic0112", "repo": "Agentnotch" }
     ]
   }
 }
