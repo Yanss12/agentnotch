@@ -55,7 +55,7 @@
       "category": "Utility"
     },
     "publish": [
-      { "provider": "github", "owner": "Mystic0112", "repo": "Agentnotch" }
+      { "provider": "github", "owner": "Mystic0112", "repo": "Agentnotch", "releaseType": "release" }
     ]
   }
 }
