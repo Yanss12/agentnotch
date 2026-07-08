@@ -1,0 +1,346 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:" />
+  <title>AgentNotch</title>
+  <style>
+    :root {
+      /* Near-opaque: backdrop-filter blur is unavailable under software
+         rendering, so translucency just leaks the window behind. */
+      --bg: rgba(18, 18, 18, 0.97);
+      --card: rgba(45, 40, 35, 0.75);
+      --ok: #00E676;
+      --warn: #FF6A2C;
+      --text: #FFFFFF;
+      --dim: rgba(255, 255, 255, 0.55);
+      --track: rgba(255, 255, 255, 0.10);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { background: transparent; color: var(--text); font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif; font-size: 12px; overflow: hidden; user-select: none; }
+    body { padding: 0; }
+
+    /* The wrapper is what animates. Kept centered horizontally. */
+    #notch {
+      position: fixed;
+      top: 0; left: 50%;
+      transform: translateX(-50%);
+      background: var(--bg);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border-radius: 0 0 22px 22px;
+      width: 400px;
+      max-height: 44px;
+      overflow: hidden;
+      transition: max-height 420ms cubic-bezier(0.22, 1, 0.36, 1);
+      border: 1px solid rgba(255, 255, 255, 0.07);
+      border-top: none;
+    }
+    /* overflow stays hidden — the max-height reveal only works when the body
+       is clipped during the transition. */
+    #notch.expanded {
+      max-height: 620px;
+    }
+
+    /* The pill (always visible). Drag region. */
+    .pill {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 18px;
+      height: 44px;
+      -webkit-app-region: drag;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: 0 0 auto; }
+    .dot.warn { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+    .pill .sep { color: var(--dim); }
+    .pill .stat { color: var(--text); font-weight: 500; }
+    .pill .stat.count-warn { color: var(--warn); font-weight: 600; }
+    .pill .chev {
+      margin-left: auto;
+      width: 22px; height: 22px;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 6px;
+      color: var(--dim);
+      cursor: pointer;
+      -webkit-app-region: no-drag;
+      transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1), background 150ms;
+    }
+    .pill .chev:hover { background: rgba(255,255,255,0.08); color: var(--text); }
+    #notch.expanded .pill .chev { transform: rotate(180deg); }
+
+    /* Body (only visible when expanded). */
+    .body { padding: 4px 16px 16px; -webkit-app-region: no-drag; }
+
+    .plan-row { display: flex; align-items: center; gap: 10px; margin: 6px 0; color: var(--dim); font-size: 11px; }
+    .plan-row .label { width: 24px; color: var(--text); font-weight: 600; }
+    .plan-row .track { flex: 1; height: 3px; background: var(--track); border-radius: 2px; overflow: hidden; }
+    .plan-row .fill  { height: 100%; background: var(--text); border-radius: 2px; transition: width 300ms ease; }
+    .plan-row .meta { flex: 0 0 auto; }
+
+    .cards { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+
+    .card {
+      background: var(--card);
+      border-radius: 14px;
+      padding: 10px 14px 10px 16px;
+      border-left: 3px solid var(--ok);
+      animation: cardin 260ms cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    @keyframes cardin {
+      from { opacity: 0; transform: translateY(-6px); }
+      to   { opacity: 1; transform: none; }
+    }
+    .card[data-status="needs_you"] { border-left-color: var(--warn); }
+    .card[data-status="idle"] { border-left-color: rgba(255,255,255,0.25); opacity: 0.65; }
+    .card[data-status="idle"] .status { color: var(--dim); }
+    .card[data-status="idle"] .ctx .fill { background: rgba(255,255,255,0.35); }
+    .card[data-status="working"] {
+      animation: cardin 260ms cubic-bezier(0.22, 1, 0.36, 1),
+                 workpulse 1.6s ease-in-out 260ms infinite;
+    }
+    /* Pulse only the outer glow — the border-left already draws the stripe. */
+    @keyframes workpulse {
+      0%,100% { box-shadow: none; }
+      50%     { box-shadow: 0 0 12px rgba(0, 230, 118, 0.35); }
+    }
+    .card .idle { color: var(--dim); font-size: 10px; margin-left: 8px; }
+
+    .card .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+    .card .head-right { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex: 0 0 auto; }
+    .card .name {
+      font-weight: 600; color: var(--text); font-size: 12px;
+      min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .card .status { font-size: 10px; font-weight: 700; letter-spacing: 0.5px; color: var(--ok); }
+    .card[data-status="needs_you"] .status { color: var(--warn); }
+
+    .card .proj {
+      color: var(--dim); font-size: 10px; margin-top: 2px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .card .action {
+      color: var(--text); font-size: 11px; margin-top: 3px; opacity: 0.9;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
+    .card .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .card .chip {
+      display: inline-flex; align-items: center; gap: 4px;
+      background: rgba(255,255,255,0.06);
+      color: var(--dim);
+      border-radius: 999px;
+      padding: 3px 9px;
+      font-size: 10px;
+      font-weight: 500;
+    }
+    .card .chip.sub { background: rgba(0, 230, 118, 0.15); color: var(--ok); font-weight: 600; }
+    .card .chip.tokens { background: rgba(255,255,255,0.10); color: var(--text); }
+    /* Explicit display on .chip beats the UA [hidden] rule — restore it. */
+    .card .chip[hidden] { display: none; }
+
+    .card .ctx { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+    .card .ctx .bar { flex: 1; height: 3px; background: var(--track); border-radius: 2px; overflow: hidden; }
+    .card .ctx .fill { height: 100%; background: var(--ok); border-radius: 2px; transition: width 300ms ease; }
+    .card[data-status="needs_you"] .ctx .fill { background: var(--warn); }
+    .card .ctx .pct { color: var(--dim); font-size: 10px; min-width: 30px; text-align: right; }
+
+    .card .approve {
+      display: none;
+      background: var(--warn);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      padding: 5px 12px;
+      min-height: 24px;
+      font-weight: 600;
+      font-size: 10px;
+      cursor: pointer;
+      -webkit-app-region: no-drag;
+    }
+    .card .approve:hover { background: #FF7733; }
+    /* ponytail: approve button hidden — clicking does nothing yet, and we
+       can't reliably detect real approval requests vs generic "awaiting input".
+       Add when Approve is wired to a real action AND detection is reliable. */
+    .card .approve { display: none !important; }
+
+    .empty { color: var(--dim); text-align: center; padding: 20px; font-size: 11px; }
+  </style>
+</head>
+<body>
+  <div id="notch">
+    <div class="pill" id="pill">
+      <span class="dot" id="dot"></span>
+      <span class="stat"><span id="agents-count">0</span> agents</span>
+      <span class="sep">·</span>
+      <span class="stat"><span id="tokens-today">0</span> today</span>
+      <span class="sep">·</span>
+      <span class="stat count-warn" id="needs-you-label"><span id="needs-you">0</span> needs you</span>
+      <span class="chev" id="chev" title="Toggle">▾</span>
+    </div>
+    <div class="body">
+      <div id="plan" class="plan" hidden>
+        <div class="plan-row">
+          <span class="label">5h</span>
+          <span id="p5h-meta" class="meta">—</span>
+          <span class="track"><span id="p5h-fill" class="fill" style="width: 0%"></span></span>
+        </div>
+        <div class="plan-row">
+          <span class="label">7d</span>
+          <span id="p7d-meta" class="meta">—</span>
+          <span class="track"><span id="p7d-fill" class="fill" style="width: 0%"></span></span>
+        </div>
+      </div>
+      <div id="cards" class="cards"></div>
+    </div>
+  </div>
+
+  <script>
+    // Bump when CARD_TEMPLATE structure changes — cards with an older version
+    // are rebuilt in render() instead of relying on a fragile selector probe.
+    const TPL_VERSION = '3';
+    const CARD_TEMPLATE = `
+      <div class="head">
+        <span class="name"></span>
+        <div class="head-right">
+          <button class="approve" type="button">Approve</button>
+          <span class="status"></span>
+        </div>
+      </div>
+      <div class="proj"></div>
+      <div class="action"></div>
+      <div class="chips">
+        <span class="chip model"></span>
+        <span class="chip tokens"></span>
+        <span class="chip sub" hidden></span>
+      </div>
+      <div class="ctx">
+        <span class="bar"><span class="fill"></span></span>
+        <span class="pct"></span>
+        <span class="idle"></span>
+      </div>
+    `;
+    const notch = document.getElementById('notch');
+    const chev = document.getElementById('chev');
+    // Hover expands; leaving collapses unless pinned. The chevron toggles pin —
+    // hover-only UX has no way to keep the dashboard open while working.
+    let pinned = false;
+    chev.addEventListener('click', (e) => {
+      e.stopPropagation();
+      pinned = !pinned;
+      chev.style.color = pinned ? 'var(--ok)' : '';
+      notch.classList.add('expanded');
+      window.agentnotch.setHover(true);
+    });
+    notch.addEventListener('mouseenter', () => {
+      notch.classList.add('expanded');
+      window.agentnotch.setHover(true);
+    });
+    notch.addEventListener('mouseleave', () => {
+      if (pinned) return;
+      notch.classList.remove('expanded');
+      window.agentnotch.setHover(false);
+    });
+
+    const els = {
+      dot: document.getElementById('dot'),
+      agentsCount: document.getElementById('agents-count'),
+      tokensToday: document.getElementById('tokens-today'),
+      needsYou: document.getElementById('needs-you'),
+      needsYouLabel: document.getElementById('needs-you-label'),
+      plan: document.getElementById('plan'),
+      p5hMeta: document.getElementById('p5h-meta'),
+      p5hFill: document.getElementById('p5h-fill'),
+      p7dMeta: document.getElementById('p7d-meta'),
+      p7dFill: document.getElementById('p7d-fill'),
+      cards: document.getElementById('cards'),
+    };
+
+    function render(payload) {
+      const { agents, plan, totals } = payload;
+
+      els.agentsCount.textContent = agents.length;
+      els.tokensToday.textContent = totals.tokens_today_fmt;
+      els.needsYou.textContent = totals.needs_you_count;
+
+      // Dim the "needs you" chunk when there are none.
+      els.needsYouLabel.style.opacity = totals.needs_you_count > 0 ? '1' : '0.55';
+      els.dot.classList.toggle('warn', totals.needs_you_count > 0);
+
+      const w5h = plan && plan.window_5h;
+      const w7d = plan && plan.window_7d;
+      if (w5h || w7d) {
+        els.plan.hidden = false;
+        if (w5h) {
+          els.p5hMeta.textContent = `${w5h.pct_left}% left${w5h.resets ? ' · resets ' + w5h.resets : ''}`;
+          els.p5hFill.style.width = w5h.pct_left + '%';
+        }
+        if (w7d) {
+          els.p7dMeta.textContent = `${w7d.pct_left}% left${w7d.resets ? ' · resets ' + w7d.resets : ''}`;
+          els.p7dFill.style.width = w7d.pct_left + '%';
+        }
+      } else {
+        els.plan.hidden = true;
+      }
+
+      // Reconcile cards without wiping (avoid flicker + preserve transitions).
+      const seen = new Set();
+      for (const a of agents) {
+        seen.add(a.id);
+        let card = document.getElementById('card-' + a.id);
+        if (!card) {
+          card = document.createElement('div');
+          card.className = 'card';
+          card.id = 'card-' + a.id;
+          card.innerHTML = CARD_TEMPLATE;
+          card.dataset.tpl = TPL_VERSION;
+          els.cards.appendChild(card);
+        } else if (card.dataset.tpl !== TPL_VERSION) {
+          card.innerHTML = CARD_TEMPLATE;
+          card.dataset.tpl = TPL_VERSION;
+        }
+        card.dataset.status = a.status;
+        card.querySelector('.name').textContent = a.project;
+        card.querySelector('.status').textContent =
+          a.status === 'needs_you' ? 'NEEDS YOU' : a.status === 'idle' ? 'IDLE' : 'WORKING';
+        card.querySelector('.proj').textContent = `↳ ${a.branch}`;
+        card.querySelector('.action').textContent = a.last_action;
+        card.querySelector('.chip.model').textContent = a.model;
+        card.querySelector('.chip.tokens').textContent = `${a.tokens_fmt} tok`;
+        const subEl = card.querySelector('.chip.sub');
+        const subs = (a.subagents || []).filter(Boolean);
+        if (subs.length) {
+          const head = a.active_subagent || subs[0];
+          const extra = subs.length > 1 ? ` +${subs.length - 1}` : '';
+          subEl.textContent = `→ ${head}${extra}`;
+          subEl.hidden = false;
+        } else {
+          subEl.hidden = true;
+        }
+        card.querySelector('.ctx .fill').style.width = a.context_pct + '%';
+        card.querySelector('.ctx .pct').textContent = a.context_pct + '%';
+        const s = a.idle_s;
+        card.querySelector('.idle').textContent =
+          s < 60 ? `${s}s ago` : s < 3600 ? `${Math.floor(s/60)}min ago` : `${Math.floor(s/3600)}h ago`;
+      }
+      // Remove stale cards. Skip non-card nodes (the .empty placeholder) so
+      // the empty state isn't churned out and recreated every tick.
+      for (const el of Array.from(els.cards.children)) {
+        if (!el.id.startsWith('card-')) continue;
+        if (!seen.has(el.id.slice(5))) el.remove();
+      }
+      if (agents.length === 0) {
+        if (!els.cards.querySelector('.empty')) {
+          els.cards.innerHTML = '<div class="empty">no active agents</div>';
+        }
+      } else {
+        const empty = els.cards.querySelector('.empty');
+        if (empty) empty.remove();
+      }
+    }
+
+    window.agentnotch.onTelemetry(render);
+  </script>
+</body>
+</html>
