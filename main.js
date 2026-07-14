@@ -2,7 +2,7 @@
 // session JSONLs from ~/.claude/projects/*/*.jsonl, and pushes telemetry to
 // the renderer once per tick.
 
-const { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, shell } = require('electron');
 // Wayland: mouse events / transparent frameless windows / setIgnoreMouseEvents
 // are all flaky. Force X11/XWayland so we get predictable behavior. No-op elsewhere.
 if (process.platform === 'linux') app.commandLine.appendSwitch('ozone-platform', 'x11');
@@ -406,6 +406,10 @@ let tray;
 let tickTimer;
 let usageTimer;
 let tickStopped = false;
+let updateTimer;
+let autoUpdater = null;   // set by setupAutoUpdate; null in dev or if require fails
+let updateInfo = null;    // UpdateInfo once a newer release is known
+let updateDownloaded = false;
 
 function scheduleTick() {
   if (tickStopped) return;
@@ -444,6 +448,67 @@ ipcMain.on('hover', (_e, inside) => {
     }, 440);
   }
 });
+
+// --- auto-update -------------------------------------------------------------
+// Windows/AppImage: full auto-update — download in background, install on quit.
+// macOS builds are unsigned and Squirrel.Mac refuses unsigned installs, and
+// .deb installs have no APPIMAGE to swap, so on those we only detect the new
+// version and offer the release page in the tray menu.
+const UPDATE_CHECK_MS = 4 * 60 * 60 * 1000;
+const RELEASES_URL = 'https://github.com/Mystic0112/Agentnotch/releases/latest';
+
+function canAutoInstall() {
+  if (process.platform === 'darwin') return false;
+  if (process.platform === 'linux' && !process.env.APPIMAGE) return false;
+  return true;
+}
+
+function setupAutoUpdate() {
+  if (!app.isPackaged) return;
+  try { ({ autoUpdater } = require('electron-updater')); }
+  catch (e) { console.error('[agentnotch] updater unavailable:', e && e.message); return; }
+
+  autoUpdater.autoDownload = canAutoInstall();
+  autoUpdater.on('error', (e) => console.error('[agentnotch] update error:', e && e.message));
+  autoUpdater.on('update-available', (info) => { updateInfo = info; refreshTrayMenu(); });
+  autoUpdater.on('update-downloaded', () => { updateDownloaded = true; refreshTrayMenu(); });
+
+  const check = () => autoUpdater.checkForUpdates().catch(() => {});
+  setTimeout(check, 10_000);
+  updateTimer = setInterval(check, UPDATE_CHECK_MS);
+}
+
+function buildTrayMenu() {
+  const items = [
+    {
+      label: 'Mostrar/Ocultar',
+      click: () => {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
+      },
+    },
+  ];
+  if (updateDownloaded) {
+    items.push({ type: 'separator' }, {
+      label: `Reiniciar e atualizar (v${updateInfo.version})`,
+      click: () => autoUpdater.quitAndInstall(),
+    });
+  } else if (updateInfo) {
+    items.push({ type: 'separator' }, {
+      label: canAutoInstall()
+        ? `Baixando v${updateInfo.version}…`
+        : `Baixar v${updateInfo.version}…`,
+      enabled: !canAutoInstall(),
+      click: () => shell.openExternal(RELEASES_URL),
+    });
+  }
+  items.push({ type: 'separator' }, { label: 'Sair', click: () => app.quit() });
+  return Menu.buildFromTemplate(items);
+}
+
+function refreshTrayMenu() {
+  if (tray) tray.setContextMenu(buildTrayMenu());
+}
 
 function createWindow() {
   const display = screen.getPrimaryDisplay();
@@ -503,23 +568,16 @@ function createWindow() {
       .resize({ width: 18, height: 18 });
     tray = new Tray(trayImg);
     tray.setToolTip('AgentNotch');
-    tray.setContextMenu(Menu.buildFromTemplate([
-      {
-        label: 'Mostrar/Ocultar',
-        click: () => {
-          if (!mainWindow || mainWindow.isDestroyed()) return;
-          mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
-        },
-      },
-      { type: 'separator' },
-      { label: 'Sair', click: () => app.quit() },
-    ]));
+    tray.setContextMenu(buildTrayMenu());
   } catch (e) {
     console.error('[agentnotch] tray unavailable:', e && e.message);
   }
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  createWindow();
+  setupAutoUpdate();
+});
 
 // before-quit fires on BOTH quit paths (tray "Sair" -> app.quit() and window
 // close); window-all-closed alone never fires for app.quit().
@@ -527,6 +585,7 @@ app.on('before-quit', () => {
   tickStopped = true;
   clearTimeout(tickTimer);
   clearInterval(usageTimer);
+  clearInterval(updateTimer);
   if (tray) { tray.destroy(); tray = null; }
 });
 
