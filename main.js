@@ -455,7 +455,7 @@ ipcMain.on('hover', (_e, inside) => {
 // .deb installs have no APPIMAGE to swap, so on those we only detect the new
 // version and offer the release page in the tray menu.
 const UPDATE_CHECK_MS = 4 * 60 * 60 * 1000;
-const RELEASES_URL = 'https://github.com/Mystic0112/Agentnotch/releases/latest';
+const RELEASES_URL = 'https://github.com/Yanss12/agentnotch/releases/latest';
 
 function canAutoInstall() {
   if (process.platform === 'darwin') return false;

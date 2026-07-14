@@ -19,7 +19,7 @@ Passe o mouse e ele expande num dashboard com um card por sessão ativa:
 
 ## Instalação
 
-Baixe o instalador do seu sistema em [**Releases**](https://github.com/Mystic0112/Agentnotch/releases):
+Baixe o instalador do seu sistema em [**Releases**](https://github.com/Yanss12/agentnotch/releases):
 
 | Sistema | Arquivo |
 |---|---|
@@ -41,7 +41,7 @@ Pré-requisito: [Claude Code](https://claude.com/claude-code) instalado e usado 
 ## Desenvolvimento
 
 ```bash
-git clone https://github.com/Mystic0112/Agentnotch.git
+git clone https://github.com/Yanss12/agentnotch.git
 cd Agentnotch
 npm install
 npm start

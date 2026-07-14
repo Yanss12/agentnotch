@@ -6,10 +6,10 @@
     "name": "AgentNotch",
     "email": "noreply@agentnotch.app"
   },
-  "homepage": "https://github.com/Mystic0112/Agentnotch",
+  "homepage": "https://github.com/Yanss12/agentnotch",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Mystic0112/Agentnotch.git"
+    "url": "https://github.com/Yanss12/agentnotch.git"
   },
   "main": "main.js",
   "scripts": {
@@ -94,8 +94,8 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "Mystic0112",
-        "repo": "Agentnotch",
+        "owner": "Yanss12",
+        "repo": "agentnotch",
         "releaseType": "release"
       }
     ]
