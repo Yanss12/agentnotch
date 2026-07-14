@@ -54,6 +54,49 @@
     }
     .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: 0 0 auto; }
     .dot.warn { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+    .dot.off { background: rgba(255, 255, 255, 0.35); box-shadow: none; }
+
+    /* The notch band: only rendered on mac, where the widget is a black
+       extension of the physical notch. The status dot lives in its right
+       wing, beside the camera housing. */
+    #band { display: none; }
+    body.mac #band {
+      display: flex; align-items: center; justify-content: flex-end;
+      padding-right: 15px;
+      height: var(--mb, 38px);
+    }
+    body.mac #band .dot { width: 9px; height: 9px; box-shadow: 0 0 7px var(--ok); }
+    body.mac #band .dot.warn { box-shadow: 0 0 7px var(--warn); }
+    body.mac #band .dot.off { box-shadow: none; }
+
+    /* macOS: #notch is the black shape itself — same color as the notch,
+       flush with the top edge, morphing width+height on expand. Collapsed,
+       max-height clips everything but the band. */
+    body.mac #notch {
+      top: 0;
+      background: #000;
+      border: none;
+      width: 280px;
+      max-height: var(--mb, 38px);
+      border-radius: 0 0 14px 14px;
+      transition: max-height 420ms cubic-bezier(0.22, 1, 0.36, 1),
+                  width 420ms cubic-bezier(0.22, 1, 0.36, 1),
+                  border-radius 420ms cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    body.mac #notch.expanded {
+      width: 460px;
+      max-height: calc(620px + var(--mb, 38px));
+      border-radius: 0 0 26px 26px;
+    }
+    /* Position is anchored to the notch — dragging would break alignment.
+       Compact single line: the 320px panel can't fit the full-size row, and
+       the band dot already shows status, so the pill dot is redundant. */
+    body.mac .pill {
+      -webkit-app-region: no-drag;
+      height: 38px; padding: 6px 18px; gap: 8px;
+      font-size: 12px; white-space: nowrap;
+    }
+    body.mac .pill .dot { display: none; }
     .pill .sep { color: var(--dim); }
     .pill .stat { color: var(--text); font-weight: 500; }
     .pill .stat.count-warn { color: var(--warn); font-weight: 600; }
@@ -73,8 +116,13 @@
     /* Body (only visible when expanded). */
     .body { padding: 4px 16px 16px; -webkit-app-region: no-drag; }
 
-    .plan-row { display: flex; align-items: center; gap: 10px; margin: 6px 0; color: var(--dim); font-size: 11px; }
-    .plan-row .label { width: 24px; color: var(--text); font-weight: 600; }
+    /* Plan usage: the two windows sit side by side, vibe-island style. */
+    .plan { display: flex; gap: 16px; }
+    /* Explicit display beats the UA [hidden] rule — restore it. */
+    .plan[hidden] { display: none; }
+    .plan-row { flex: 1; display: flex; align-items: center; gap: 8px; margin: 6px 0; color: var(--dim); font-size: 11px; min-width: 0; }
+    .plan-row .label { color: var(--text); font-weight: 600; flex: 0 0 auto; }
+    .plan-row .meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .plan-row .track { flex: 1; height: 3px; background: var(--track); border-radius: 2px; overflow: hidden; }
     .plan-row .fill  { height: 100%; background: var(--text); border-radius: 2px; transition: width 300ms ease; }
     .plan-row .meta { flex: 0 0 auto; }
@@ -82,35 +130,32 @@
     .cards { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
 
     .card {
-      background: var(--card);
+      background: rgba(255, 255, 255, 0.06);
       border-radius: 14px;
-      padding: 10px 14px 10px 16px;
-      border-left: 3px solid var(--ok);
+      padding: 11px 14px;
       animation: cardin 260ms cubic-bezier(0.22, 1, 0.36, 1);
     }
     @keyframes cardin {
       from { opacity: 0; transform: translateY(-6px); }
       to   { opacity: 1; transform: none; }
     }
-    .card[data-status="needs_you"] { border-left-color: var(--warn); }
-    .card[data-status="idle"] { border-left-color: rgba(255,255,255,0.25); opacity: 0.65; }
+    .card[data-status="needs_you"] { background: rgba(255, 106, 44, 0.13); }
+    .card[data-status="idle"] { opacity: 0.55; }
     .card[data-status="idle"] .status { color: var(--dim); }
-    .card[data-status="idle"] .ctx .fill { background: rgba(255,255,255,0.35); }
     .card[data-status="working"] {
       animation: cardin 260ms cubic-bezier(0.22, 1, 0.36, 1),
-                 workpulse 1.6s ease-in-out 260ms infinite;
+                 workpulse 1.8s ease-in-out 260ms infinite;
     }
-    /* Pulse only the outer glow — the border-left already draws the stripe. */
     @keyframes workpulse {
-      0%,100% { box-shadow: none; }
-      50%     { box-shadow: 0 0 12px rgba(0, 230, 118, 0.35); }
+      0%,100% { box-shadow: inset 0 0 0 1px rgba(0, 230, 118, 0.12); }
+      50%     { box-shadow: inset 0 0 0 1px rgba(0, 230, 118, 0.4); }
     }
     .card .idle { color: var(--dim); font-size: 10px; margin-left: 8px; }
 
     .card .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
     .card .head-right { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex: 0 0 auto; }
     .card .name {
-      font-weight: 600; color: var(--text); font-size: 12px;
+      font-weight: 600; color: var(--text); font-size: 13px;
       min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .card .status { font-size: 10px; font-weight: 700; letter-spacing: 0.5px; color: var(--ok); }
@@ -121,7 +166,7 @@
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .card .action {
-      color: var(--text); font-size: 11px; margin-top: 3px; opacity: 0.9;
+      color: var(--text); font-size: 12px; margin-top: 3px; opacity: 0.9;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
 
@@ -136,15 +181,19 @@
       font-weight: 500;
     }
     .card .chip.sub { background: rgba(0, 230, 118, 0.15); color: var(--ok); font-weight: 600; }
-    .card .chip.tokens { background: rgba(255,255,255,0.10); color: var(--text); }
     /* Explicit display on .chip beats the UA [hidden] rule — restore it. */
     .card .chip[hidden] { display: none; }
-
-    .card .ctx { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
-    .card .ctx .bar { flex: 1; height: 3px; background: var(--track); border-radius: 2px; overflow: hidden; }
-    .card .ctx .fill { height: 100%; background: var(--ok); border-radius: 2px; transition: width 300ms ease; }
-    .card[data-status="needs_you"] .ctx .fill { background: var(--warn); }
-    .card .ctx .pct { color: var(--dim); font-size: 10px; min-width: 30px; text-align: right; }
+    .card .chips .idle { margin-left: auto; align-self: center; }
+    /* Dismiss (✕): hover-only, removes the session card from the notch. */
+    .card .close {
+      display: none; align-items: center; justify-content: center;
+      width: 18px; height: 18px; margin-left: 6px;
+      border: none; border-radius: 6px; cursor: pointer;
+      background: rgba(255,255,255,0.08); color: var(--dim); font-size: 10px;
+      -webkit-app-region: no-drag;
+    }
+    .card:hover .close { display: inline-flex; }
+    .card .close:hover { background: rgba(255,106,44,0.25); color: var(--warn); }
 
     .card .approve {
       display: none;
@@ -166,10 +215,66 @@
     .card .approve { display: none !important; }
 
     .empty { color: var(--dim); text-align: center; padding: 20px; font-size: 11px; }
+
+    /* Approval cards, vibe-island style: colored header line, mono detail,
+       Deny/Allow split row (Allow is the white primary), or stacked option
+       rows with number chips for AskUserQuestion. */
+    .approval { background: rgba(255, 255, 255, 0.05); }
+    .approval .ahead {
+      display: flex; align-items: center; gap: 7px;
+      font-size: 11px; font-weight: 600; color: var(--warn);
+    }
+    .approval .ahead .adot { width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }
+    .approval .atitle { margin-top: 7px; font-size: 12px; font-weight: 600; color: var(--text); }
+    .approval .atitle .warn-ico { color: var(--warn); margin-right: 5px; }
+    .approval .detail {
+      color: var(--dim); font-size: 11px; margin-top: 4px;
+      font-family: ui-monospace, monospace;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .approval button { border: none; cursor: pointer; -webkit-app-region: no-drag; }
+    .approval .btns { display: flex; gap: 8px; margin-top: 10px; }
+    .approval .btns button {
+      flex: 1; padding: 8px 0; border-radius: 9px;
+      font-weight: 600; font-size: 11.5px;
+    }
+    .approval .btns button.deny { background: rgba(255,255,255,0.09); color: var(--text); }
+    .approval .btns button.deny:hover { background: rgba(255,255,255,0.18); }
+    .approval .btns button.allow { background: #fff; color: #000; }
+    .approval .btns button.allow:hover { background: #e8e8e8; }
+    .approval .opts { display: flex; flex-direction: column; gap: 6px; margin-top: 9px; }
+    .approval .opts button {
+      display: flex; align-items: center; gap: 9px;
+      width: 100%; text-align: left; padding: 8px 10px;
+      border-radius: 9px; font-size: 12px; color: var(--text);
+      background: rgba(110, 210, 230, 0.07);
+      border: 1px solid rgba(110, 210, 230, 0.22);
+    }
+    .approval .opts button:hover { background: rgba(110, 210, 230, 0.18); }
+    .approval .opts .key {
+      flex: 0 0 auto; min-width: 18px; text-align: center;
+      background: rgba(255,255,255,0.10); color: var(--dim);
+      border-radius: 5px; padding: 1px 5px; font-size: 10px; font-weight: 600;
+    }
+    .approval .opts button.skip { background: none; border-color: rgba(255,255,255,0.14); color: var(--dim); }
+
+    .queued { color: var(--dim); text-align: center; font-size: 10px; padding: 2px 0; }
+
+    /* Post-decision banner hanging from the notch: "✓ Aprovado". */
+    #banner { display: none; }
+    body.mac #notch.banner #banner {
+      display: flex; align-items: center; justify-content: center;
+      height: 36px; gap: 7px;
+      font-weight: 600; font-size: 12px; color: var(--ok);
+    }
+    #banner.warn { color: var(--warn); }
+    body.mac #notch.banner { max-height: calc(var(--mb, 38px) + 36px); }
   </style>
 </head>
 <body>
   <div id="notch">
+    <div id="band"><span class="dot" id="macdot-dot"></span></div>
+    <div id="banner"></div>
     <div class="pill" id="pill">
       <span class="dot" id="dot"></span>
       <span class="stat"><span id="agents-count">0</span> agents</span>
@@ -192,6 +297,7 @@
           <span class="track"><span id="p7d-fill" class="fill" style="width: 0%"></span></span>
         </div>
       </div>
+      <div id="approvals" class="cards"></div>
       <div id="cards" class="cards"></div>
     </div>
   </div>
@@ -199,7 +305,7 @@
   <script>
     // Bump when CARD_TEMPLATE structure changes — cards with an older version
     // are rebuilt in render() instead of relying on a fragile selector probe.
-    const TPL_VERSION = '3';
+    const TPL_VERSION = '5';
     const CARD_TEMPLATE = `
       <div class="head">
         <span class="name"></span>
@@ -212,17 +318,18 @@
       <div class="action"></div>
       <div class="chips">
         <span class="chip model"></span>
-        <span class="chip tokens"></span>
         <span class="chip sub" hidden></span>
-      </div>
-      <div class="ctx">
-        <span class="bar"><span class="fill"></span></span>
-        <span class="pct"></span>
         <span class="idle"></span>
+        <button class="close" title="Remover do notch">✕</button>
       </div>
     `;
     const notch = document.getElementById('notch');
     const chev = document.getElementById('chev');
+    // macOS notch mode (set by main via query string): collapsed = dot only.
+    const params = new URLSearchParams(location.search);
+    const MAC = params.get('mac') === '1';
+    const MENUBAR = parseInt(params.get('menubar') || '38', 10) || 38;
+    const macdotDot = document.getElementById('macdot-dot');
     // Hover expands; leaving collapses unless pinned. The chevron toggles pin —
     // hover-only UX has no way to keep the dashboard open while working.
     let pinned = false;
@@ -230,18 +337,54 @@
       e.stopPropagation();
       pinned = !pinned;
       chev.style.color = pinned ? 'var(--ok)' : '';
+      if (MAC) { window.agentnotch.setPin(pinned); return; }
       notch.classList.add('expanded');
       window.agentnotch.setHover(true);
     });
-    notch.addEventListener('mouseenter', () => {
-      notch.classList.add('expanded');
-      window.agentnotch.setHover(true);
-    });
-    notch.addEventListener('mouseleave', () => {
-      if (pinned) return;
-      notch.classList.remove('expanded');
-      window.agentnotch.setHover(false);
-    });
+    if (!MAC) {
+      notch.addEventListener('mouseenter', () => {
+        notch.classList.add('expanded');
+        window.agentnotch.setHover(true);
+      });
+      notch.addEventListener('mouseleave', () => {
+        if (pinned) return;
+        notch.classList.remove('expanded');
+        window.agentnotch.setHover(false);
+      });
+    }
+
+    // mac mode: main polls the real cursor and owns expand/collapse; the
+    // renderer only swaps dot/panel and plays the CSS animation.
+    function reportPanelH() {
+      // Only meaningful once fully expanded — mid-transition offsetHeight is
+      // clamped by the animating max-height and would shrink main's region.
+      if (MAC && notch.classList.contains('expanded')) {
+        window.agentnotch.reportPanelH(Math.max(notch.offsetHeight, 120));
+      }
+    }
+    if (MAC) {
+      document.body.classList.add('mac');
+      document.documentElement.style.setProperty('--mb', MENUBAR + 'px');
+      notch.addEventListener('transitionend', reportPanelH);
+      // The black shape is permanent; expand/collapse is just a class flip
+      // and the CSS morph does the rest — nothing is swapped or hidden.
+      window.agentnotch.onMacExpand((open) => {
+        if (open) notch.classList.remove('banner');
+        notch.classList.toggle('expanded', open);
+      });
+      // Post-decision confirmation: morph down to a small tab under the
+      // notch showing "✓ <label>", then back to the bar.
+      const banner = document.getElementById('banner');
+      let bannerTimer = null;
+      window.agentnotch.onMacBanner(({ text, ok }) => {
+        notch.classList.remove('expanded');
+        banner.textContent = `${ok ? '✓' : '✕'} ${text}`;
+        banner.classList.toggle('warn', !ok);
+        notch.classList.add('banner');
+        if (bannerTimer) clearTimeout(bannerTimer);
+        bannerTimer = setTimeout(() => notch.classList.remove('banner'), 2000);
+      });
+    }
 
     const els = {
       dot: document.getElementById('dot'),
@@ -249,6 +392,7 @@
       tokensToday: document.getElementById('tokens-today'),
       needsYou: document.getElementById('needs-you'),
       needsYouLabel: document.getElementById('needs-you-label'),
+      approvals: document.getElementById('approvals'),
       plan: document.getElementById('plan'),
       p5hMeta: document.getElementById('p5h-meta'),
       p5hFill: document.getElementById('p5h-fill'),
@@ -257,8 +401,62 @@
       cards: document.getElementById('cards'),
     };
 
+    // Approvals rebuild wholesale (they're rare and short-lived); the JSON
+    // signature check keeps ticks from destroying buttons mid-click.
+    let lastApprovalsSig = '';
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, (c) =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+    function renderApprovals(all) {
+      // One decision at a time: show the oldest request; the rest wait in
+      // line (the main process re-expands with the next one after each
+      // confirmation banner).
+      const approvals = all.slice(0, 1);
+      const queued = all.length - approvals.length;
+      const sig = JSON.stringify(all);
+      if (sig === lastApprovalsSig) return;
+      lastApprovalsSig = sig;
+      els.approvals.innerHTML = approvals.map((a) => {
+        if (Array.isArray(a.options)) {
+          const rows = a.options.map((o, i) =>
+            `<button data-id="${esc(a.id)}" data-d="answer" data-a="${esc(o)}">
+               <span class="key">${i + 1}</span>${esc(o)}</button>`).join('')
+            + `<button class="skip" data-id="${esc(a.id)}" data-d="deny">
+                 <span class="key">✕</span>Dismiss</button>`;
+          return `<div class="card approval">
+            <div class="ahead"><span class="adot"></span>Claude asks</div>
+            <div class="atitle">${esc(a.summary)}</div>
+            <div class="opts">${rows}</div>
+          </div>`;
+        }
+        return `<div class="card approval">
+          <div class="ahead"><span class="adot"></span>Permission Request</div>
+          <div class="atitle"><span class="warn-ico">⚠</span>${esc(a.tool)}</div>
+          <div class="detail">${esc(a.summary)}</div>
+          <div class="btns">
+            <button class="deny" data-id="${esc(a.id)}" data-d="deny">Deny</button>
+            <button class="allow" data-id="${esc(a.id)}" data-d="allow">Allow</button>
+          </div>
+        </div>`;
+      }).join('') + (queued > 0 ? `<div class="queued">+${queued} aguardando</div>` : '');
+    }
+    document.getElementById('cards').addEventListener('click', (e) => {
+      const b = e.target.closest('button.close');
+      if (!b) return;
+      const card = b.closest('.card');
+      if (card && card.dataset.sid) window.agentnotch.dismissSession(card.dataset.sid);
+    });
+    document.getElementById('approvals').addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-id]');
+      if (!b) return;
+      b.disabled = true;
+      window.agentnotch.sendDecision(b.dataset.id, b.dataset.d, b.dataset.a || '');
+    });
+
     function render(payload) {
       const { agents, plan, totals } = payload;
+      renderApprovals(payload.approvals || []);
 
       els.agentsCount.textContent = agents.length;
       els.tokensToday.textContent = totals.tokens_today_fmt;
@@ -267,6 +465,9 @@
       // Dim the "needs you" chunk when there are none.
       els.needsYouLabel.style.opacity = totals.needs_you_count > 0 ? '1' : '0.55';
       els.dot.classList.toggle('warn', totals.needs_you_count > 0);
+      els.dot.classList.toggle('off', agents.length === 0);
+      macdotDot.classList.toggle('warn', totals.needs_you_count > 0);
+      macdotDot.classList.toggle('off', agents.length === 0);
 
       const w5h = plan && plan.window_5h;
       const w7d = plan && plan.window_7d;
@@ -301,13 +502,13 @@
           card.dataset.tpl = TPL_VERSION;
         }
         card.dataset.status = a.status;
+        card.dataset.sid = a.sid || '';
         card.querySelector('.name').textContent = a.project;
         card.querySelector('.status').textContent =
           a.status === 'needs_you' ? 'NEEDS YOU' : a.status === 'idle' ? 'IDLE' : 'WORKING';
         card.querySelector('.proj').textContent = `↳ ${a.branch}`;
         card.querySelector('.action').textContent = a.last_action;
         card.querySelector('.chip.model').textContent = a.model;
-        card.querySelector('.chip.tokens').textContent = `${a.tokens_fmt} tok`;
         const subEl = card.querySelector('.chip.sub');
         const subs = (a.subagents || []).filter(Boolean);
         if (subs.length) {
@@ -318,8 +519,6 @@
         } else {
           subEl.hidden = true;
         }
-        card.querySelector('.ctx .fill').style.width = a.context_pct + '%';
-        card.querySelector('.ctx .pct').textContent = a.context_pct + '%';
         const s = a.idle_s;
         card.querySelector('.idle').textContent =
           s < 60 ? `${s}s ago` : s < 3600 ? `${Math.floor(s/60)}min ago` : `${Math.floor(s/3600)}h ago`;
@@ -338,6 +537,7 @@
         const empty = els.cards.querySelector('.empty');
         if (empty) empty.remove();
       }
+      reportPanelH(); // card count changes the panel height main watches
     }
 
     window.agentnotch.onTelemetry(render);

@@ -1,6 +1,6 @@
 {
   "name": "agentnotch",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Dynamic-island style desktop widget for Claude agents",
   "author": {
     "name": "AgentNotch",
@@ -21,7 +21,7 @@
     "release": "electron-builder -mwl --publish always"
   },
   "devDependencies": {
-    "electron": "^32.0.0",
+    "electron": "^43.1.0",
     "electron-builder": "^25.0.0"
   },
   "build": {

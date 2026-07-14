@@ -8,12 +8,15 @@ const { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, shell } = 
 if (process.platform === 'linux') app.commandLine.appendSwitch('ozone-platform', 'x11');
 // 2D widget — software rendering is plenty, and flaky GPU drivers have been
 // crashing the GPU process ("GPU process isn't usable") on some machines.
-app.disableHardwareAcceleration();
+// macOS keeps the GPU: software rendering there paints transparent windows
+// with an opaque white backing.
+if (process.platform !== 'darwin') app.disableHardwareAcceleration();
 // Only one notch per desktop — a second launch exits immediately.
 if (!app.requestSingleInstanceLock()) app.exit(0);
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const http = require('http');
 
 const WIDTH = 404;               // notch is 400px wide; 2px margin each side
 const COLLAPSED_H = 46;
@@ -28,6 +31,14 @@ const FRESH_MS = 15 * 60 * 1000; // 15 min — anything older feels stale
 const MAX_CARDS = 4;
 const MAX_JSONL_BYTES = 8 * 1024 * 1024; // beyond this, read only the tail
 const TAIL_BYTES = 512 * 1024;
+
+// macOS: the widget renders as a black extension of the physical notch
+// (~200px wide, centered) — a slightly wider bar with the status dot in its
+// right wing. The window is created once at full size and never resized;
+// expand/collapse is pure CSS morph and clicks pass through when collapsed.
+const MAC_NOTCH = process.platform === 'darwin';
+const MAC_BAR_W = 280;           // collapsed bar: notch + a wing each side
+const MAC_W = 464;               // window (and expanded panel) width
 
 const MODEL_NAMES = {
   'claude-fable-5': 'Fable 5',
@@ -174,7 +185,12 @@ function parseSession(filePath, mtimeMs, sizeBytes, now) {
         }
       }
     } else if (rec.type === 'user') {
-      lastRole = 'user';
+      // An interrupt is logged as a user message — it means Claude STOPPED,
+      // not that it is processing a new request.
+      const mc = msg.content;
+      const firstText = typeof mc === 'string' ? mc
+        : Array.isArray(mc) && mc[0] && typeof mc[0].text === 'string' ? mc[0].text : '';
+      lastRole = firstText.startsWith('[Request interrupted') ? 'interrupted' : 'user';
       lastStop = null;
       lastTool = null;
     }
@@ -194,6 +210,9 @@ function parseSession(filePath, mtimeMs, sizeBytes, now) {
   } else if (lastRole === 'user') {
     status = 'working';
     lastAction = 'Processing request';
+  } else if (lastRole === 'interrupted') {
+    status = 'needs_you';
+    lastAction = 'Interrupted';
   } else {
     status = 'needs_you';
     lastAction = 'Awaiting input';
@@ -272,17 +291,81 @@ function fmtDate(ts) {
 // every USAGE_FETCH_MS; consumed by buildPayload. Null when unavailable.
 let usageCache = null;
 
-function readAccessToken() {
+
+const KEYCHAIN_SERVICE = 'Claude Code-credentials';
+// Claude Code's public OAuth client id — needed to refresh its tokens.
+const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+
+// Reads Claude Code's credentials. Linux/Windows keep them on disk; macOS
+// keeps them in the Keychain (first read may show a system access prompt).
+function readCreds() {
   try {
-    const raw = fs.readFileSync(CREDS_FILE, 'utf8');
-    const j = JSON.parse(raw);
-    const tok = j && j.claudeAiOauth && j.claudeAiOauth.accessToken;
-    return typeof tok === 'string' && tok ? tok : null;
-  } catch { return null; }
+    const json = JSON.parse(fs.readFileSync(CREDS_FILE, 'utf8'));
+    if (json && json.claudeAiOauth) return { source: 'file', json };
+  } catch {}
+  if (process.platform === 'darwin') {
+    try {
+      const { execSync, execFileSync } = require('child_process');
+      const raw = execSync(`security find-generic-password -s "${KEYCHAIN_SERVICE}" -w`,
+        { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] });
+      const json = JSON.parse(raw);
+      if (!json || !json.claudeAiOauth) return null;
+      const meta = execFileSync('security', ['find-generic-password', '-s', KEYCHAIN_SERVICE],
+        { encoding: 'utf8', timeout: 3000 });
+      const m = meta.match(/"acct"<blob>="([^"]*)"/);
+      return { source: 'keychain', json, account: (m && m[1]) || os.userInfo().username };
+    } catch { return null; }
+  }
+  return null;
+}
+
+function writeCredsBack(creds) {
+  const payload = JSON.stringify(creds.json);
+  if (creds.source === 'file') {
+    fs.writeFileSync(CREDS_FILE, payload, { mode: 0o600 });
+    return;
+  }
+  require('child_process').execFileSync('security',
+    ['add-generic-password', '-U', '-s', KEYCHAIN_SERVICE, '-a', creds.account, '-w', payload],
+    { timeout: 3000, stdio: 'ignore' });
+}
+
+// Returns a live access token, refreshing it the same way Claude Code does
+// when the stored one expired. The rotated refresh token is written back so
+// Claude Code's own login keeps working.
+async function getUsableToken() {
+  const creds = readCreds();
+  if (!creds) return null;
+  const o = creds.json.claudeAiOauth;
+  if (o.accessToken && (!o.expiresAt || o.expiresAt - Date.now() > 60_000)) return o.accessToken;
+  if (!o.refreshToken) return o.accessToken || null;
+  try {
+    const res = await fetch('https://console.anthropic.com/v1/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        grant_type: 'refresh_token',
+        refresh_token: o.refreshToken,
+        client_id: OAUTH_CLIENT_ID,
+      }),
+    });
+    if (!res.ok) {
+      console.error('[agentnotch] token refresh failed:', res.status);
+      return o.accessToken || null;
+    }
+    const t = await res.json();
+    if (!t || typeof t.access_token !== 'string') return o.accessToken || null;
+    o.accessToken = t.access_token;
+    if (typeof t.refresh_token === 'string' && t.refresh_token) o.refreshToken = t.refresh_token;
+    o.expiresAt = Date.now() + ((typeof t.expires_in === 'number' ? t.expires_in : 3600) * 1000);
+    try { writeCredsBack(creds); }
+    catch (e) { console.error('[agentnotch] creds write-back failed:', e && e.message); }
+    return o.accessToken;
+  } catch { return o.accessToken || null; }
 }
 
 async function fetchUsage() {
-  const token = readAccessToken();
+  const token = await getUsableToken();
   if (!token) return;
   try {
     const res = await fetch('https://api.anthropic.com/api/oauth/usage', {
@@ -363,9 +446,17 @@ function buildPayload() {
     seenCwd.add(key);
     deduped.push(s);
   }
-  const fresh = deduped.filter(s => now - s.mtime <= FRESH_MS).slice(0, MAX_CARDS);
+  // Drop cards the user dismissed — new activity on the session brings it back.
+  const visible = deduped.filter(s => {
+    const at = dismissedSessions.get(s.session_id);
+    if (at === undefined) return true;
+    if (s.mtime > at) { dismissedSessions.delete(s.session_id); return true; }
+    return false;
+  });
+  const fresh = visible.filter(s => now - s.mtime <= FRESH_MS).slice(0, MAX_CARDS);
   const agents = fresh.map(s => ({
     id: s.session_id.slice(0, 8),
+    sid: s.session_id,
     // A session untouched for 5+ min isn't "needs you" nor "working" — the
     // conversation simply ended. Downgrade to idle so orange means "answer me
     // to continue", not "a session exists".
@@ -393,6 +484,7 @@ function buildPayload() {
   return {
     agents,
     plan,
+    approvals: pendingApprovals(),
     totals: {
       tokens_today: tokensToday,
       tokens_today_fmt: fmtTokens(tokensToday),
@@ -407,6 +499,12 @@ let tickTimer;
 let usageTimer;
 let tickStopped = false;
 let updateTimer;
+let macBounds = null;     // { menuBarH, collapsed, expanded } — darwin only
+let macHoverTimer = null;
+let macExpanded = false;
+let macPinned = false;
+let macPanelH = 200;      // visible panel height reported by the renderer
+let approvalServer = null;
 let autoUpdater = null;   // set by setupAutoUpdate; null in dev or if require fails
 let updateInfo = null;    // UpdateInfo once a newer release is known
 let updateDownloaded = false;
@@ -426,12 +524,63 @@ function scheduleTick() {
   }, TICK_MS);
 }
 
+// mac notch mode: DOM hover is unreliable here — resizing the window under a
+// stationary cursor fires spurious enter/leave pairs and the dot/panel swap
+// oscillates. Instead the main process polls the real cursor position and is
+// the single authority on expand/collapse; the renderer only animates.
+function macHoverPoll() {
+  if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) return;
+  const p = screen.getCursorScreenPoint();
+  const M = 10; // hysteresis margin so edge jitter doesn't flap
+  if (!macExpanded) {
+    const c = macBounds.collapsed;
+    if (p.x >= c.x - M && p.x <= c.x + c.width + M && p.y >= c.y && p.y <= c.y + c.height + M) {
+      macExpanded = true;
+      mainWindow.setIgnoreMouseEvents(false);
+      mainWindow.webContents.send('mac-expand', true);
+    }
+  } else {
+    // Stay open while pinned or while an approval is waiting for the user.
+    if (macPinned || pendings.size > 0) return;
+    const e = macBounds.expanded;
+    // Leave region = the visible panel (renderer-reported height), not the
+    // whole window — the window is transparent below the panel.
+    const bottom = e.y + Math.min(macPanelH + M, e.height);
+    const inside = p.x >= e.x - M && p.x <= e.x + e.width + M
+      && p.y >= e.y && p.y <= bottom;
+    if (!inside) {
+      macExpanded = false;
+      mainWindow.webContents.send('mac-expand', false);
+      // Let clicks fall through again once the CSS collapse played out.
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed() && !macExpanded) {
+          mainWindow.setIgnoreMouseEvents(true, { forward: true });
+        }
+      }, 460);
+    }
+  }
+}
+
+ipcMain.on('dismiss-session', (_e, sid) => {
+  if (typeof sid !== 'string' || !sid) return;
+  dismissedSessions.set(sid, Date.now());
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.webContents.send('telemetry', buildPayload()); } catch {}
+  }
+});
+
+ipcMain.on('pin', (_e, pinned) => { macPinned = !!pinned; });
+ipcMain.on('panel-h', (_e, px) => {
+  if (typeof px === 'number' && px > 0) macPanelH = Math.round(px);
+});
+
 // Sync window size with the CSS transition. Grow BEFORE expanding CSS, shrink
 // AFTER collapsing CSS — the window never clips the animation. Registered once
 // at module level so repeat createWindow calls can't stack listeners.
 let collapseTimer = null;
 ipcMain.on('hover', (_e, inside) => {
   if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (macBounds) return; // mac mode: macHoverPoll owns the window bounds
   if (collapseTimer) { clearTimeout(collapseTimer); collapseTimer = null; }
   const b = mainWindow.getBounds();
   if (inside) {
@@ -448,6 +597,178 @@ ipcMain.on('hover', (_e, inside) => {
     }, 440);
   }
 });
+
+// --- approvals ---------------------------------------------------------------
+// A Claude Code PreToolUse hook POSTs the pending tool call here and waits.
+// The notch shows Allow/Deny (or the AskUserQuestion options); the hook echoes
+// our JSON decision back to Claude Code. No decision within HOOK_WAIT_MS →
+// 204 empty → the hook prints nothing and the normal terminal prompt runs.
+const APPROVAL_PORT = 41999;
+const HOOK_WAIT_MS = 22_000;
+const HOOK_SCRIPT = path.join(os.homedir(), '.claude', 'agentnotch-hook.sh');
+const SETTINGS_FILE = path.join(os.homedir(), '.claude', 'settings.json');
+const pendings = new Map(); // id -> { data, res, timer }
+let pendingSeq = 0;
+
+// Sessions the user removed from the notch (✕ on the card). Keyed by full
+// session id → dismissal time; any newer activity on the file resurfaces it.
+const dismissedSessions = new Map();
+
+function hookDecision(permissionDecision, permissionDecisionReason) {
+  return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision, permissionDecisionReason } };
+}
+
+function notifyPendings() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try { mainWindow.webContents.send('telemetry', buildPayload()); } catch {}
+  // A pending approval is a "needs you" moment — pop the notch open.
+  if (pendings.size > 0 && macBounds && !macExpanded) {
+    macExpanded = true;
+    mainWindow.setIgnoreMouseEvents(false);
+    mainWindow.webContents.send('mac-expand', true);
+  }
+}
+
+function resolvePending(id, decision, reason, banner) {
+  const p = pendings.get(id);
+  if (!p) return;
+  pendings.delete(id);
+  clearTimeout(p.timer);
+  try {
+    p.res.writeHead(200, { 'Content-Type': 'application/json' });
+    p.res.end(JSON.stringify(hookDecision(decision, reason)));
+  } catch {}
+  notifyPendings();
+  // Each decision gets its confirmation banner. With more requests queued,
+  // the panel re-expands right after the banner to show the next one;
+  // otherwise it settles back into the bar.
+  if (banner && macBounds && mainWindow && !mainWindow.isDestroyed()) {
+    macExpanded = false;
+    try { mainWindow.webContents.send('mac-banner', banner); } catch {}
+    if (pendings.size > 0) {
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed() && pendings.size > 0 && !macExpanded) {
+          macExpanded = true;
+          mainWindow.setIgnoreMouseEvents(false);
+          mainWindow.webContents.send('mac-expand', true);
+        }
+      }, 1400);
+    } else {
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed() && !macExpanded) {
+          mainWindow.setIgnoreMouseEvents(true, { forward: true });
+        }
+      }, 2400);
+    }
+  }
+}
+
+function startApprovalServer() {
+  approvalServer = http.createServer((req, res) => {
+    if (req.method !== 'POST' || req.url !== '/hook') { res.writeHead(404); res.end(); return; }
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 1e6) req.destroy(); });
+    req.on('end', () => {
+      let data;
+      try { data = JSON.parse(body); } catch { res.writeHead(400); res.end(); return; }
+      // Don't stall calls the session would auto-approve anyway (accept-edits
+      // or bypass modes) — answer "no opinion" instantly and let them run.
+      const mode = data.permission_mode || '';
+      const autoOk = mode === 'bypassPermissions'
+        || (mode === 'acceptEdits'
+            && ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(data.tool_name));
+      if (autoOk) { res.writeHead(204); res.end(); return; }
+      const id = String(++pendingSeq);
+      const timer = setTimeout(() => {
+        pendings.delete(id);
+        try { res.writeHead(204); res.end(); } catch {}
+        notifyPendings();
+      }, HOOK_WAIT_MS);
+      pendings.set(id, { data, res, timer });
+      notifyPendings();
+    });
+  });
+  approvalServer.on('error', (e) => console.error('[agentnotch] approval server:', e && e.message));
+  approvalServer.listen(APPROVAL_PORT, '127.0.0.1');
+}
+
+function pendingApprovals() {
+  const out = [];
+  for (const [id, p] of pendings) {
+    const d = p.data || {};
+    const tool = d.tool_name || '?';
+    const inp = (d.tool_input && typeof d.tool_input === 'object') ? d.tool_input : {};
+    let summary = tool;
+    let options = null;
+    if (tool === 'AskUserQuestion') {
+      const q = Array.isArray(inp.questions) && inp.questions[0] ? inp.questions[0] : null;
+      summary = q && q.question ? q.question : 'Claude asks';
+      options = q && Array.isArray(q.options)
+        ? q.options.map(o => o && o.label).filter(Boolean).slice(0, 4) : [];
+    } else if (tool === 'Bash' && typeof inp.command === 'string') {
+      summary = inp.command.slice(0, 120);
+    } else if (typeof inp.file_path === 'string') {
+      summary = inp.file_path;
+    }
+    out.push({ id, session_id: d.session_id || '', tool, summary, options });
+  }
+  return out;
+}
+
+ipcMain.on('decision', (_e, msg) => {
+  if (!msg || typeof msg !== 'object') return;
+  const { id, decision, answer } = msg;
+  if (decision === 'allow') {
+    resolvePending(String(id), 'allow', 'Approved from AgentNotch', { text: 'Aprovado', ok: true });
+  } else if (decision === 'answer') {
+    const ans = String(answer).slice(0, 200);
+    resolvePending(String(id), 'deny', `The user answered: "${ans}"`, { text: ans.slice(0, 28), ok: true });
+  } else {
+    resolvePending(String(id), 'deny', 'Denied from AgentNotch', { text: 'Negado', ok: false });
+  }
+});
+
+// Writes the bridge script and registers it in ~/.claude/settings.json.
+// Only ever called from an explicit user action (tray menu).
+function installApprovalHook() {
+  const script = `#!/bin/sh
+# AgentNotch approval bridge (PreToolUse). Reads the hook JSON from stdin,
+# asks the notch, prints the decision. No output = normal terminal prompt.
+curl -s -m 25 -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:${APPROVAL_PORT}/hook 2>/dev/null || true
+`;
+  fs.writeFileSync(HOOK_SCRIPT, script, { mode: 0o755 });
+  let s = {};
+  try { s = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')); } catch {}
+  if (!s || typeof s !== 'object') s = {};
+  s.hooks = (s.hooks && typeof s.hooks === 'object') ? s.hooks : {};
+  const arr = Array.isArray(s.hooks.PreToolUse) ? s.hooks.PreToolUse : (s.hooks.PreToolUse = []);
+  if (!JSON.stringify(arr).includes('agentnotch-hook')) {
+    arr.push({
+      matcher: 'Bash|Write|Edit|MultiEdit|NotebookEdit|AskUserQuestion',
+      hooks: [{ type: 'command', command: HOOK_SCRIPT, timeout: 30 }],
+    });
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(s, null, 2));
+  }
+  console.log('[agentnotch] approval hook installed');
+}
+
+function uninstallApprovalHook() {
+  try {
+    const s = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+    if (s.hooks && Array.isArray(s.hooks.PreToolUse)) {
+      s.hooks.PreToolUse = s.hooks.PreToolUse.filter(h => !JSON.stringify(h).includes('agentnotch-hook'));
+      if (!s.hooks.PreToolUse.length) delete s.hooks.PreToolUse;
+      fs.writeFileSync(SETTINGS_FILE, JSON.stringify(s, null, 2));
+    }
+  } catch {}
+  try { fs.unlinkSync(HOOK_SCRIPT); } catch {}
+  console.log('[agentnotch] approval hook removed');
+}
+
+function approvalHookInstalled() {
+  try { return JSON.stringify(JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')).hooks || {}).includes('agentnotch-hook'); }
+  catch { return false; }
+}
 
 // --- auto-update -------------------------------------------------------------
 // Windows/AppImage: full auto-update — download in background, install on quit.
@@ -487,6 +808,15 @@ function buildTrayMenu() {
         mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
       },
     },
+    {
+      label: 'Aprovações no notch (Claude Code)',
+      type: 'checkbox',
+      checked: approvalHookInstalled(),
+      click: (item) => {
+        item.checked ? installApprovalHook() : uninstallApprovalHook();
+        refreshTrayMenu();
+      },
+    },
   ];
   if (updateDownloaded) {
     items.push({ type: 'separator' }, {
@@ -513,13 +843,36 @@ function refreshTrayMenu() {
 function createWindow() {
   const display = screen.getPrimaryDisplay();
   const { width } = display.workAreaSize;
-  const x = Math.round((width - WIDTH) / 2) + display.workArea.x;
+  let x = Math.round((width - WIDTH) / 2) + display.workArea.x;
+  let y = display.workArea.y;
+  let winW = WIDTH;
+  let winH = COLLAPSED_H;
+
+  if (MAC_NOTCH) {
+    const b = display.bounds;
+    // workArea.y - bounds.y is the menu bar height (~38px on notched Macs).
+    const menuBarH = Math.max(24, display.workArea.y - b.y);
+    macBounds = {
+      menuBarH,
+      // Hover target while collapsed: the black bar hugging the notch.
+      collapsed: {
+        x: b.x + Math.round((b.width - MAC_BAR_W) / 2),
+        y: b.y, width: MAC_BAR_W, height: menuBarH,
+      },
+      // The window's one and only geometry — it is never resized.
+      expanded: {
+        x: b.x + Math.round((b.width - MAC_W) / 2),
+        y: b.y, width: MAC_W, height: EXPANDED_H + menuBarH,
+      },
+    };
+    ({ x, y, width: winW, height: winH } = macBounds.expanded);
+  }
 
   mainWindow = new BrowserWindow({
-    width: WIDTH,
-    height: COLLAPSED_H,         // start small; window resizes on hover
+    width: winW,
+    height: winH,                // start small; window resizes on hover
     x,
-    y: display.workArea.y,
+    y,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
@@ -538,8 +891,21 @@ function createWindow() {
   });
 
   mainWindow.setAlwaysOnTop(true, 'screen-saver');
+  if (macBounds) {
+    // macOS clamps y=0 below the menu bar at creation time; once the window
+    // level is elevated, re-apply the bounds so the bar sits over the band.
+    mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    mainWindow.setBounds(macBounds.expanded);
+    // Collapsed, the window is a transparent full-size sheet — clicks must
+    // fall through to whatever is underneath. The poller flips this on hover.
+    mainWindow.setIgnoreMouseEvents(true, { forward: true });
+    if (macHoverTimer) clearInterval(macHoverTimer);
+    macHoverTimer = setInterval(macHoverPoll, 120);
+  }
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  mainWindow.loadFile('index.html');
+  mainWindow.loadFile('index.html', MAC_NOTCH
+    ? { query: { mac: '1', menubar: String(macBounds.menuBarH) } }
+    : undefined);
   if (process.env.AGENTNOTCH_DEBUG) {
     mainWindow.webContents.openDevTools({ mode: 'detach' });
     mainWindow.webContents.on('console-message', (_e, level, msg, line, src) => {
@@ -577,6 +943,7 @@ function createWindow() {
 app.whenReady().then(() => {
   createWindow();
   setupAutoUpdate();
+  startApprovalServer();
 });
 
 // before-quit fires on BOTH quit paths (tray "Sair" -> app.quit() and window
@@ -586,6 +953,14 @@ app.on('before-quit', () => {
   clearTimeout(tickTimer);
   clearInterval(usageTimer);
   clearInterval(updateTimer);
+  clearInterval(macHoverTimer);
+  // Release in-flight hooks with no decision — the terminal prompt takes over.
+  for (const [, p] of pendings) {
+    clearTimeout(p.timer);
+    try { p.res.writeHead(204); p.res.end(); } catch {}
+  }
+  pendings.clear();
+  if (approvalServer) { try { approvalServer.close(); } catch {} approvalServer = null; }
   if (tray) { tray.destroy(); tray = null; }
 });
 
