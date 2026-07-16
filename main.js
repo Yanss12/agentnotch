@@ -618,6 +618,27 @@ function hookDecision(permissionDecision, permissionDecisionReason) {
   return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision, permissionDecisionReason } };
 }
 
+// When the Claude desktop app is the frontmost app, the user is looking at its
+// own permission prompt — the notch must not pop open nor stall the hook.
+// Detected via lsappinfo (no extra macOS permissions needed). Any failure
+// (timeout, unexpected output) falls back to the normal notch flow.
+const CLAUDE_APP_BUNDLES = new Set([
+  'com.anthropic.claudefordesktop',
+  'com.anthropic.claude-code',
+]);
+
+function claudeAppIsFrontmost(cb) {
+  if (process.platform !== 'darwin') { cb(false); return; }
+  require('child_process').exec(
+    'lsappinfo info -only bundleid `lsappinfo front`',
+    { timeout: 1500 },
+    (err, out) => {
+      if (err || !out) { cb(false); return; }
+      const m = String(out).match(/"?CFBundleIdentifier"?\s*=\s*"([^"]+)"/);
+      cb(!!m && CLAUDE_APP_BUNDLES.has(m[1]));
+    });
+}
+
 function notifyPendings() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   try { mainWindow.webContents.send('telemetry', buildPayload()); } catch {}
@@ -678,14 +699,19 @@ function startApprovalServer() {
         || (mode === 'acceptEdits'
             && ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(data.tool_name));
       if (autoOk) { res.writeHead(204); res.end(); return; }
-      const id = String(++pendingSeq);
-      const timer = setTimeout(() => {
-        pendings.delete(id);
-        try { res.writeHead(204); res.end(); } catch {}
+      claudeAppIsFrontmost((inApp) => {
+        // User is in the Claude app: answer "no opinion" right away so the
+        // app's own prompt shows instantly and the notch stays collapsed.
+        if (inApp) { try { res.writeHead(204); res.end(); } catch {} return; }
+        const id = String(++pendingSeq);
+        const timer = setTimeout(() => {
+          pendings.delete(id);
+          try { res.writeHead(204); res.end(); } catch {}
+          notifyPendings();
+        }, HOOK_WAIT_MS);
+        pendings.set(id, { data, res, timer });
         notifyPendings();
-      }, HOOK_WAIT_MS);
-      pendings.set(id, { data, res, timer });
-      notifyPendings();
+      });
     });
   });
   approvalServer.on('error', (e) => console.error('[agentnotch] approval server:', e && e.message));
