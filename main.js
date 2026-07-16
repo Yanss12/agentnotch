@@ -753,7 +753,9 @@ function pendingApprovals() {
     } else if (typeof inp.file_path === 'string') {
       summary = inp.file_path;
     }
-    out.push({ id, session_id: d.session_id || '', tool, summary, options });
+    // Which project asked — hook input carries the session's cwd.
+    const project = typeof d.cwd === 'string' && d.cwd ? path.basename(d.cwd) : '';
+    out.push({ id, session_id: d.session_id || '', tool, summary, options, project });
   }
   return out;
 }
