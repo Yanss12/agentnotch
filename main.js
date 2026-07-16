@@ -599,10 +599,14 @@ ipcMain.on('hover', (_e, inside) => {
 });
 
 // --- approvals ---------------------------------------------------------------
-// A Claude Code PreToolUse hook POSTs the pending tool call here and waits.
-// The notch shows Allow/Deny (or the AskUserQuestion options); the hook echoes
-// our JSON decision back to Claude Code. No decision within HOOK_WAIT_MS →
-// 204 empty → the hook prints nothing and the normal terminal prompt runs.
+// A Claude Code hook POSTs the pending call here and waits. Two events feed it:
+//  - PermissionRequest (any tool): fires only when a real permission dialog is
+//    about to appear — read-only/sandboxed/allowlisted calls never reach us.
+//  - PreToolUse (AskUserQuestion only): questions never open a permission
+//    dialog, so they must be caught before the tool runs.
+// The notch shows Allow/Deny (or the question options); the hook echoes our
+// JSON decision back to Claude Code. No decision within HOOK_WAIT_MS →
+// 204 empty → the hook prints nothing and the normal prompt runs.
 const APPROVAL_PORT = 41999;
 const HOOK_WAIT_MS = 22_000;
 const HOOK_SCRIPT = path.join(os.homedir(), '.claude', 'agentnotch-hook.sh');
@@ -614,8 +618,20 @@ let pendingSeq = 0;
 // session id → dismissal time; any newer activity on the file resurfaces it.
 const dismissedSessions = new Map();
 
-function hookDecision(permissionDecision, permissionDecisionReason) {
-  return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision, permissionDecisionReason } };
+// Shape the reply for whichever event asked — the two hooks expect different
+// output schemas.
+function hookDecision(eventName, behavior, message) {
+  if (eventName === 'PreToolUse') {
+    return { hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: behavior,
+      permissionDecisionReason: message,
+    } };
+  }
+  return { hookSpecificOutput: {
+    hookEventName: 'PermissionRequest',
+    decision: behavior === 'allow' ? { behavior: 'allow' } : { behavior: 'deny', message },
+  } };
 }
 
 // When the Claude desktop app is the frontmost app, the user is looking at its
@@ -656,8 +672,9 @@ function resolvePending(id, decision, reason, banner) {
   pendings.delete(id);
   clearTimeout(p.timer);
   try {
+    const ev = (p.data && p.data.hook_event_name) || 'PermissionRequest';
     p.res.writeHead(200, { 'Content-Type': 'application/json' });
-    p.res.end(JSON.stringify(hookDecision(decision, reason)));
+    p.res.end(JSON.stringify(hookDecision(ev, decision, reason)));
   } catch {}
   notifyPendings();
   // Each decision gets its confirmation banner. With more requests queued,
@@ -754,12 +771,20 @@ ipcMain.on('decision', (_e, msg) => {
   }
 });
 
+// True for entries ≤0.1.3 put on PreToolUse: they intercepted every matched
+// tool call, including ones Claude Code would auto-approve without any prompt
+// (read-only bash, sandboxed commands, allow rules). The only entry that
+// belongs on PreToolUse now is the AskUserQuestion-only one.
+function isLegacyPreToolUseEntry(h) {
+  return h && JSON.stringify(h).includes('agentnotch-hook') && h.matcher !== 'AskUserQuestion';
+}
+
 // Writes the bridge script and registers it in ~/.claude/settings.json.
-// Only ever called from an explicit user action (tray menu).
+// Called from the tray toggle, and at startup to migrate ≤0.1.3 installs.
 function installApprovalHook() {
   const script = `#!/bin/sh
-# AgentNotch approval bridge (PreToolUse). Reads the hook JSON from stdin,
-# asks the notch, prints the decision. No output = normal terminal prompt.
+# AgentNotch approval bridge. Reads the hook JSON from stdin, asks the notch,
+# prints the decision. No output = Claude Code's own prompt runs normally.
 curl -s -m 25 -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:${APPROVAL_PORT}/hook 2>/dev/null || true
 `;
   fs.writeFileSync(HOOK_SCRIPT, script, { mode: 0o755 });
@@ -767,28 +792,61 @@ curl -s -m 25 -X POST -H 'Content-Type: application/json' --data-binary @- http:
   try { s = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')); } catch {}
   if (!s || typeof s !== 'object') s = {};
   s.hooks = (s.hooks && typeof s.hooks === 'object') ? s.hooks : {};
-  const arr = Array.isArray(s.hooks.PreToolUse) ? s.hooks.PreToolUse : (s.hooks.PreToolUse = []);
-  if (!JSON.stringify(arr).includes('agentnotch-hook')) {
-    arr.push({
-      matcher: 'Bash|Write|Edit|MultiEdit|NotebookEdit|AskUserQuestion',
-      hooks: [{ type: 'command', command: HOOK_SCRIPT, timeout: 30 }],
-    });
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(s, null, 2));
+  let changed = false;
+
+  if (Array.isArray(s.hooks.PreToolUse)) {
+    const kept = s.hooks.PreToolUse.filter(h => !isLegacyPreToolUseEntry(h));
+    if (kept.length !== s.hooks.PreToolUse.length) { s.hooks.PreToolUse = kept; changed = true; }
+    if (!s.hooks.PreToolUse.length) delete s.hooks.PreToolUse;
   }
+
+  const entry = (matcher) => ({
+    ...(matcher ? { matcher } : {}), // no matcher = every tool
+    hooks: [{ type: 'command', command: HOOK_SCRIPT, timeout: 30 }],
+  });
+
+  // Real permission dialogs, any tool — the notch mirrors exactly what the
+  // terminal/app would ask, nothing more.
+  const pr = Array.isArray(s.hooks.PermissionRequest)
+    ? s.hooks.PermissionRequest : (s.hooks.PermissionRequest = []);
+  if (!JSON.stringify(pr).includes('agentnotch-hook')) { pr.push(entry(null)); changed = true; }
+
+  // Questions still need PreToolUse — they never open a permission dialog.
+  const pre = Array.isArray(s.hooks.PreToolUse)
+    ? s.hooks.PreToolUse : (s.hooks.PreToolUse = []);
+  if (!JSON.stringify(pre).includes('agentnotch-hook')) { pre.push(entry('AskUserQuestion')); changed = true; }
+
+  if (changed) fs.writeFileSync(SETTINGS_FILE, JSON.stringify(s, null, 2));
   console.log('[agentnotch] approval hook installed');
 }
 
 function uninstallApprovalHook() {
   try {
     const s = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
-    if (s.hooks && Array.isArray(s.hooks.PreToolUse)) {
-      s.hooks.PreToolUse = s.hooks.PreToolUse.filter(h => !JSON.stringify(h).includes('agentnotch-hook'));
-      if (!s.hooks.PreToolUse.length) delete s.hooks.PreToolUse;
+    if (s.hooks && typeof s.hooks === 'object') {
+      for (const ev of ['PreToolUse', 'PermissionRequest']) {
+        if (!Array.isArray(s.hooks[ev])) continue;
+        s.hooks[ev] = s.hooks[ev].filter(h => !JSON.stringify(h).includes('agentnotch-hook'));
+        if (!s.hooks[ev].length) delete s.hooks[ev];
+      }
       fs.writeFileSync(SETTINGS_FILE, JSON.stringify(s, null, 2));
     }
   } catch {}
   try { fs.unlinkSync(HOOK_SCRIPT); } catch {}
   console.log('[agentnotch] approval hook removed');
+}
+
+// ≤0.1.3 registered the bridge under PreToolUse for every tool. If that entry
+// is still present, rerun the installer once to move it to PermissionRequest.
+function migrateApprovalHook() {
+  try {
+    const s = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+    const pre = s.hooks && Array.isArray(s.hooks.PreToolUse) ? s.hooks.PreToolUse : [];
+    if (pre.some(isLegacyPreToolUseEntry)) {
+      installApprovalHook();
+      console.log('[agentnotch] approval hook migrated to PermissionRequest');
+    }
+  } catch {}
 }
 
 function approvalHookInstalled() {
@@ -967,9 +1025,15 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  // Accessory app: no Dock icon, and — crucial — never counted as the
+  // frontmost application. Launching (or clicking) the notch would otherwise
+  // leave AgentNotch itself as macOS's front app, breaking the "user is in
+  // the Claude app" check that keeps approvals out of the notch.
+  if (MAC_NOTCH) app.dock.hide();
   createWindow();
   setupAutoUpdate();
   startApprovalServer();
+  migrateApprovalHook();
 });
 
 // before-quit fires on BOTH quit paths (tray "Sair" -> app.quit() and window
