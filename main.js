@@ -503,6 +503,8 @@ let macBounds = null;     // { menuBarH, collapsed, expanded } — darwin only
 let macHoverTimer = null;
 let macExpanded = false;
 let macPinned = false;
+let macTyping = false;    // freeform answer input focused — hold panel + focus
+let macHoldUntil = 0;     // auto-pop grace deadline (ms epoch)
 let macPanelH = 200;      // visible panel height reported by the renderer
 let approvalServer = null;
 let autoUpdater = null;   // set by setupAutoUpdate; null in dev or if require fails
@@ -540,14 +542,21 @@ function macHoverPoll() {
       mainWindow.webContents.send('mac-expand', true);
     }
   } else {
-    // Stay open while pinned or while an approval is waiting for the user.
-    if (macPinned || pendings.size > 0) return;
+    // Stay open while pinned or while the user is typing an answer.
+    if (macPinned || macTyping) return;
     const e = macBounds.expanded;
     // Leave region = the visible panel (renderer-reported height), not the
     // whole window — the window is transparent below the panel.
     const bottom = e.y + Math.min(macPanelH + M, e.height);
     const inside = p.x >= e.x - M && p.x <= e.x + e.width + M
       && p.y >= e.y && p.y <= bottom;
+    // Auto-pop grace: an approval expands the notch under a cursor that is
+    // elsewhere — give the user a beat to see it before it may retract. Once
+    // the cursor reaches the panel, normal hover rules take over. A pending
+    // no longer pins the panel open: the dot stays orange and hovering
+    // brings the request back.
+    if (inside) macHoldUntil = 0;
+    else if (Date.now() < macHoldUntil) return;
     if (!inside) {
       macExpanded = false;
       mainWindow.webContents.send('mac-expand', false);
@@ -570,6 +579,18 @@ ipcMain.on('dismiss-session', (_e, sid) => {
 });
 
 ipcMain.on('pin', (_e, pinned) => { macPinned = !!pinned; });
+// The HUD window is focusable:false so it never steals focus — but typing a
+// freeform answer needs a key window. Grant focus only while the text field
+// is active, then hand it straight back to whatever the user was in.
+ipcMain.on('keyboard', (_e, on) => {
+  macTyping = !!on;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    mainWindow.setFocusable(macTyping);
+    if (macTyping) mainWindow.focus();
+    else mainWindow.blur();
+  } catch (e) { console.error('[agentnotch] keyboard toggle:', e && e.message); }
+});
 ipcMain.on('panel-h', (_e, px) => {
   if (typeof px === 'number' && px > 0) macPanelH = Math.round(px);
 });
@@ -608,7 +629,13 @@ ipcMain.on('hover', (_e, inside) => {
 // JSON decision back to Claude Code. No decision within HOOK_WAIT_MS →
 // 204 empty → the hook prints nothing and the normal prompt runs.
 const APPROVAL_PORT = 41999;
-const HOOK_WAIT_MS = 22_000;
+// How long a request may wait in the notch. The bridge curl (-m) and the
+// settings hook timeout are staggered above this so Claude Code never kills
+// the hook first. Long holds are safe: switching into the Claude app releases
+// every pending instantly (focus watcher below).
+const HOOK_WAIT_MS = 120_000;
+const HOOK_CURL_TIMEOUT_S = 125;
+const HOOK_SETTINGS_TIMEOUT_S = 130;
 const HOOK_SCRIPT = path.join(os.homedir(), '.claude', 'agentnotch-hook.sh');
 const SETTINGS_FILE = path.join(os.homedir(), '.claude', 'settings.json');
 const pendings = new Map(); // id -> { data, res, timer }
@@ -658,9 +685,11 @@ function claudeAppIsFrontmost(cb) {
 function notifyPendings() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   try { mainWindow.webContents.send('telemetry', buildPayload()); } catch {}
-  // A pending approval is a "needs you" moment — pop the notch open.
+  // A pending approval is a "needs you" moment — pop the notch open, but
+  // only briefly: after the grace window the user may let it retract.
   if (pendings.size > 0 && macBounds && !macExpanded) {
     macExpanded = true;
+    macHoldUntil = Date.now() + 8000;
     mainWindow.setIgnoreMouseEvents(false);
     mainWindow.webContents.send('mac-expand', true);
   }
@@ -687,6 +716,7 @@ function resolvePending(id, decision, reason, banner) {
       setTimeout(() => {
         if (mainWindow && !mainWindow.isDestroyed() && pendings.size > 0 && !macExpanded) {
           macExpanded = true;
+          macHoldUntil = Date.now() + 8000;
           mainWindow.setIgnoreMouseEvents(false);
           mainWindow.webContents.send('mac-expand', true);
         }
@@ -701,7 +731,34 @@ function resolvePending(id, decision, reason, banner) {
   }
 }
 
+// Answer every held request with "no opinion" (204) — Claude Code's own
+// prompt takes over immediately.
+function releaseAllPendings() {
+  if (!pendings.size) return;
+  for (const [id, p] of pendings) {
+    pendings.delete(id);
+    clearTimeout(p.timer);
+    try { p.res.writeHead(204); p.res.end(); } catch {}
+  }
+  notifyPendings();
+  if (macBounds && macExpanded && mainWindow && !mainWindow.isDestroyed()) {
+    macExpanded = false;
+    mainWindow.webContents.send('mac-expand', false);
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed() && !macExpanded) {
+        mainWindow.setIgnoreMouseEvents(true, { forward: true });
+      }
+    }, 460);
+  }
+}
+
 function startApprovalServer() {
+  // Focus watcher: if the user switches into the Claude app while requests
+  // are waiting here, hand them all over to the app's own dialogs.
+  setInterval(() => {
+    if (!pendings.size) return;
+    claudeAppIsFrontmost((inApp) => { if (inApp) releaseAllPendings(); });
+  }, 1500);
   approvalServer = http.createServer((req, res) => {
     if (req.method !== 'POST' || req.url !== '/hook') { res.writeHead(404); res.end(); return; }
     let body = '';
@@ -773,21 +830,14 @@ ipcMain.on('decision', (_e, msg) => {
   }
 });
 
-// True for entries ≤0.1.3 put on PreToolUse: they intercepted every matched
-// tool call, including ones Claude Code would auto-approve without any prompt
-// (read-only bash, sandboxed commands, allow rules). The only entry that
-// belongs on PreToolUse now is the AskUserQuestion-only one.
-function isLegacyPreToolUseEntry(h) {
-  return h && JSON.stringify(h).includes('agentnotch-hook') && h.matcher !== 'AskUserQuestion';
-}
-
 // Writes the bridge script and registers it in ~/.claude/settings.json.
-// Called from the tray toggle, and at startup to migrate ≤0.1.3 installs.
+// Called from the tray toggle, and at every startup (when already installed)
+// so older installs converge on the current script/entries automatically.
 function installApprovalHook() {
   const script = `#!/bin/sh
 # AgentNotch approval bridge. Reads the hook JSON from stdin, asks the notch,
 # prints the decision. No output = Claude Code's own prompt runs normally.
-curl -s -m 25 -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:${APPROVAL_PORT}/hook 2>/dev/null || true
+curl -s -m ${HOOK_CURL_TIMEOUT_S} -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:${APPROVAL_PORT}/hook 2>/dev/null || true
 `;
   fs.writeFileSync(HOOK_SCRIPT, script, { mode: 0o755 });
   let s = {};
@@ -796,27 +846,25 @@ curl -s -m 25 -X POST -H 'Content-Type: application/json' --data-binary @- http:
   s.hooks = (s.hooks && typeof s.hooks === 'object') ? s.hooks : {};
   let changed = false;
 
-  if (Array.isArray(s.hooks.PreToolUse)) {
-    const kept = s.hooks.PreToolUse.filter(h => !isLegacyPreToolUseEntry(h));
-    if (kept.length !== s.hooks.PreToolUse.length) { s.hooks.PreToolUse = kept; changed = true; }
-    if (!s.hooks.PreToolUse.length) delete s.hooks.PreToolUse;
-  }
-
   const entry = (matcher) => ({
     ...(matcher ? { matcher } : {}), // no matcher = every tool
-    hooks: [{ type: 'command', command: HOOK_SCRIPT, timeout: 30 }],
+    hooks: [{ type: 'command', command: HOOK_SCRIPT, timeout: HOOK_SETTINGS_TIMEOUT_S }],
   });
 
-  // Real permission dialogs, any tool — the notch mirrors exactly what the
-  // terminal/app would ask, nothing more.
-  const pr = Array.isArray(s.hooks.PermissionRequest)
-    ? s.hooks.PermissionRequest : (s.hooks.PermissionRequest = []);
-  if (!JSON.stringify(pr).includes('agentnotch-hook')) { pr.push(entry(null)); changed = true; }
-
-  // Questions still need PreToolUse — they never open a permission dialog.
-  const pre = Array.isArray(s.hooks.PreToolUse)
-    ? s.hooks.PreToolUse : (s.hooks.PreToolUse = []);
-  if (!JSON.stringify(pre).includes('agentnotch-hook')) { pre.push(entry('AskUserQuestion')); changed = true; }
+  // Desired state, one entry per event; anything else of ours (legacy
+  // PreToolUse-for-everything from ≤0.1.3, stale timeouts) gets replaced.
+  //  - PermissionRequest (all tools): real permission dialogs only.
+  //  - PreToolUse (AskUserQuestion): questions never open a dialog.
+  const desired = [['PermissionRequest', entry(null)], ['PreToolUse', entry('AskUserQuestion')]];
+  for (const [ev, want] of desired) {
+    const arr = Array.isArray(s.hooks[ev]) ? s.hooks[ev] : [];
+    const others = arr.filter(h => !JSON.stringify(h).includes('agentnotch-hook'));
+    const mine = arr.filter(h => JSON.stringify(h).includes('agentnotch-hook'));
+    if (mine.length !== 1 || JSON.stringify(mine[0]) !== JSON.stringify(want)) {
+      s.hooks[ev] = [...others, want];
+      changed = true;
+    }
+  }
 
   if (changed) fs.writeFileSync(SETTINGS_FILE, JSON.stringify(s, null, 2));
   console.log('[agentnotch] approval hook installed');
@@ -838,18 +886,6 @@ function uninstallApprovalHook() {
   console.log('[agentnotch] approval hook removed');
 }
 
-// ≤0.1.3 registered the bridge under PreToolUse for every tool. If that entry
-// is still present, rerun the installer once to move it to PermissionRequest.
-function migrateApprovalHook() {
-  try {
-    const s = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
-    const pre = s.hooks && Array.isArray(s.hooks.PreToolUse) ? s.hooks.PreToolUse : [];
-    if (pre.some(isLegacyPreToolUseEntry)) {
-      installApprovalHook();
-      console.log('[agentnotch] approval hook migrated to PermissionRequest');
-    }
-  } catch {}
-}
 
 function approvalHookInstalled() {
   try { return JSON.stringify(JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')).hooks || {}).includes('agentnotch-hook'); }
@@ -1035,7 +1071,9 @@ app.whenReady().then(() => {
   createWindow();
   setupAutoUpdate();
   startApprovalServer();
-  migrateApprovalHook();
+  // Converge older installs (legacy event, stale timeouts) on the current
+  // script + settings entries.
+  if (approvalHookInstalled()) installApprovalHook();
 });
 
 // before-quit fires on BOTH quit paths (tray "Sair" -> app.quit() and window

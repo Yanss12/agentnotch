@@ -10,5 +10,7 @@ contextBridge.exposeInMainWorld('agentnotch', {
   reportPanelH: (px) => ipcRenderer.send('panel-h', px),
   // approvals: decision is 'allow' | 'deny' | 'answer' (answer carries a label)
   sendDecision: (id, decision, answer) => ipcRenderer.send('decision', { id, decision, answer }),
+  // freeform answers: window takes keyboard focus only while typing
+  setKeyboard: (on) => ipcRenderer.send('keyboard', on),
   dismissSession: (sid) => ipcRenderer.send('dismiss-session', sid),
 });

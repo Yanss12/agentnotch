@@ -257,6 +257,20 @@
       border: 1px solid rgba(110, 210, 230, 0.22);
     }
     .approval .opts button:hover { background: rgba(110, 210, 230, 0.18); }
+    .approval .freeform { display: flex; gap: 6px; margin-top: 7px; }
+    .approval .freeform input {
+      flex: 1; min-width: 0; -webkit-app-region: no-drag; outline: none;
+      background: rgba(255, 255, 255, 0.07);
+      border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 9px;
+      color: var(--text); font-size: 11px; padding: 6px 10px;
+    }
+    .approval .freeform input::placeholder { color: var(--dim); }
+    .approval .freeform input:focus { border-color: rgba(110, 210, 230, 0.55); }
+    .approval .freeform button {
+      background: rgba(110, 210, 230, 0.14); color: var(--text);
+      border-radius: 9px; padding: 6px 11px; font-size: 11px; font-weight: 600;
+    }
+    .approval .freeform button:hover { background: rgba(110, 210, 230, 0.26); }
     .approval .opts .key {
       flex: 0 0 auto; min-width: 18px; text-align: center;
       background: rgba(255,255,255,0.10); color: var(--dim);
@@ -438,6 +452,10 @@
             <div class="ahead"><span class="adot"></span>Claude asks${proj(a)}</div>
             <div class="atitle">${esc(a.summary)}</div>
             <div class="opts">${rows}</div>
+            <div class="freeform">
+              <input type="text" maxlength="200" placeholder="Ou digite sua resposta…">
+              <button data-id="${esc(a.id)}" data-d="answer-input">Enviar</button>
+            </div>
           </div>`;
         }
         return `<div class="card approval">
@@ -457,27 +475,53 @@
       const card = b.closest('.card');
       if (card && card.dataset.sid) window.agentnotch.dismissSession(card.dataset.sid);
     });
-    document.getElementById('approvals').addEventListener('click', (e) => {
+    const approvalsDiv = document.getElementById('approvals');
+    approvalsDiv.addEventListener('click', (e) => {
       const b = e.target.closest('button[data-id]');
       if (!b) return;
+      if (b.dataset.d === 'answer-input') {
+        const inp = b.parentElement.querySelector('input');
+        const v = ((inp && inp.value) || '').trim();
+        if (!v) return;
+        b.disabled = true;
+        window.agentnotch.setKeyboard(false);
+        window.agentnotch.sendDecision(b.dataset.id, 'answer', v);
+        return;
+      }
       b.disabled = true;
       window.agentnotch.sendDecision(b.dataset.id, b.dataset.d, b.dataset.a || '');
+    });
+    // Freeform input: the HUD window only takes keyboard focus while the
+    // field is active (main hands focus back on blur). Enter submits.
+    approvalsDiv.addEventListener('focusin', (e) => {
+      if (e.target.matches('.freeform input')) window.agentnotch.setKeyboard(true);
+    });
+    approvalsDiv.addEventListener('focusout', (e) => {
+      if (e.target.matches('.freeform input')) window.agentnotch.setKeyboard(false);
+    });
+    approvalsDiv.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && e.target.matches('.freeform input')) {
+        const btn = e.target.parentElement.querySelector('button[data-d="answer-input"]');
+        if (btn) btn.click();
+      }
     });
 
     function render(payload) {
       const { agents, plan, totals } = payload;
+      const pending = (payload.approvals || []).length;
       renderApprovals(payload.approvals || []);
 
       els.agentsCount.textContent = agents.length;
       els.tokensToday.textContent = totals.tokens_today_fmt;
       els.needsYou.textContent = totals.needs_you_count;
 
-      // Dim the "needs you" chunk when there are none.
+      // Dim the "needs you" chunk when there are none. A waiting approval
+      // keeps the dot orange even with the panel retracted.
       els.needsYouLabel.style.opacity = totals.needs_you_count > 0 ? '1' : '0.55';
-      els.dot.classList.toggle('warn', totals.needs_you_count > 0);
-      els.dot.classList.toggle('off', agents.length === 0);
-      macdotDot.classList.toggle('warn', totals.needs_you_count > 0);
-      macdotDot.classList.toggle('off', agents.length === 0);
+      els.dot.classList.toggle('warn', totals.needs_you_count > 0 || pending > 0);
+      els.dot.classList.toggle('off', agents.length === 0 && pending === 0);
+      macdotDot.classList.toggle('warn', totals.needs_you_count > 0 || pending > 0);
+      macdotDot.classList.toggle('off', agents.length === 0 && pending === 0);
 
       const w5h = plan && plan.window_5h;
       const w7d = plan && plan.window_7d;
