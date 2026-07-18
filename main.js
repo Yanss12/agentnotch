@@ -629,13 +629,13 @@ ipcMain.on('hover', (_e, inside) => {
 // JSON decision back to Claude Code. No decision within HOOK_WAIT_MS →
 // 204 empty → the hook prints nothing and the normal prompt runs.
 const APPROVAL_PORT = 41999;
-// How long a request may wait in the notch. The bridge curl (-m) and the
-// settings hook timeout are staggered above this so Claude Code never kills
-// the hook first. Long holds are safe: switching into the Claude app releases
-// every pending instantly (focus watcher below).
-const HOOK_WAIT_MS = 120_000;
-const HOOK_CURL_TIMEOUT_S = 125;
-const HOOK_SETTINGS_TIMEOUT_S = 130;
+// How long a request may wait in the notch before falling back to Claude
+// Code's own prompt. The bridge curl (-m) and the settings hook timeout are
+// staggered above this so Claude Code never kills the hook first. Switching
+// into the Claude app releases every pending instantly (focus watcher below).
+const HOOK_WAIT_MS = 20_000;
+const HOOK_CURL_TIMEOUT_S = 25;
+const HOOK_SETTINGS_TIMEOUT_S = 30;
 const HOOK_SCRIPT = path.join(os.homedir(), '.claude', 'agentnotch-hook.sh');
 const SETTINGS_FILE = path.join(os.homedir(), '.claude', 'settings.json');
 const pendings = new Map(); // id -> { data, res, timer }
@@ -762,17 +762,22 @@ function startApprovalServer() {
   approvalServer = http.createServer((req, res) => {
     if (req.method !== 'POST' || req.url !== '/hook') { res.writeHead(404); res.end(); return; }
     let body = '';
-    req.on('data', (c) => { body += c; if (body.length > 1e6) req.destroy(); });
+    let dropped = false;
+    req.on('data', (c) => {
+      if (dropped) return;
+      body += c;
+      // Giant payloads (a Write carrying a multi-MB file) must not kill the
+      // request — fall through to Claude Code's own prompt instead.
+      if (body.length > 32e6) { dropped = true; body = ''; }
+    });
     req.on('end', () => {
+      if (dropped) { res.writeHead(204); res.end(); return; }
       let data;
       try { data = JSON.parse(body); } catch { res.writeHead(400); res.end(); return; }
-      // Don't stall calls the session would auto-approve anyway (accept-edits
-      // or bypass modes) — answer "no opinion" instantly and let them run.
-      const mode = data.permission_mode || '';
-      const autoOk = mode === 'bypassPermissions'
-        || (mode === 'acceptEdits'
-            && ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(data.tool_name));
-      if (autoOk) { res.writeHead(204); res.end(); return; }
+      // NOTE: no permission_mode filtering here. PermissionRequest only fires
+      // when a dialog is really about to appear — skipping acceptEdits/bypass
+      // sessions would hide the dialogs those modes still show (e.g. a Write
+      // outside the workspace), which is exactly a moment the user is needed.
       claudeAppIsFrontmost((inApp) => {
         // User is in the Claude app: answer "no opinion" right away so the
         // app's own prompt shows instantly and the notch stays collapsed.

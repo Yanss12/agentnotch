@@ -433,10 +433,9 @@
       return a.project ? `<span class="aproj">${esc(a.project)}</span>` : '';
     }
     function renderApprovals(all) {
-      // One decision at a time: show the oldest request; the rest wait in
-      // line (the main process re-expands with the next one after each
-      // confirmation banner).
-      const approvals = all.slice(0, 1);
+      // Requests time out individually (~20s), so queued ones must be visible
+      // too or they expire unseen — stack up to 3, oldest first.
+      const approvals = all.slice(0, 3);
       const queued = all.length - approvals.length;
       const sig = JSON.stringify(all);
       if (sig === lastApprovalsSig) return;
